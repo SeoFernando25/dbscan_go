@@ -14,15 +14,17 @@ import (
 func readCSV(filename string) (Rect, []Point) {
 	// Open the file
 	file, err := os.Open(filename)
-	defer file.Close()
 	if err != nil {
 		fmt.Println("Error:", err)
 		return Rect{}, nil
 	}
+	defer file.Close()
 
 	// Create a new list
 	list := make([]Point, 0)
-	minx, miny, maxx, maxy := math.MaxFloat64, math.MaxFloat64, -math.MaxFloat64, -math.MaxFloat64
+
+	readFirstLine := false
+	minX, minY, maxX, maxY := math.MaxFloat64, math.MaxFloat64, -math.MaxFloat64, -math.MaxFloat64
 
 	// Read the file line by line
 	scanner := bufio.NewScanner(file)
@@ -36,42 +38,48 @@ func readCSV(filename string) (Rect, []Point) {
 		scale := 1.0
 		p := Point{x * scale, y * scale}
 
-		// Update the bounding box
-		if p.x < minx {
-			minx = p.x
-		}
-		if p.y < miny {
-			miny = p.y
-		}
-		if p.x > maxx {
-			maxx = x
-		}
-		if p.y > maxy {
-			maxy = p.y
+		if !readFirstLine {
+			readFirstLine = true
+			minX = p.x
+			minY = p.y
+			maxX = p.x
+			maxY = p.y
+		} else {
+			// Update the bounding box
+			if p.x <= minX {
+				minX = p.x
+			}
+			if p.y <= minY {
+				minY = p.y
+			}
+			if p.x >= maxX {
+				maxX = p.x
+			}
+			if p.y >= maxY {
+				maxY = p.y
+			}
 		}
 
 		list = append(list, p)
 	}
 
-	return Rect{minx - 1, miny - 1, maxx - minx + 2, maxy - miny + 2}, list
+	return Rect{minX, minY, maxX - minX, maxY - minY}, list
 }
 
-// Writes the list of "list of points" to a CSV file, eg:
-// ClusterId,Latitude,Longitude,Size
-// 1,37.78,122.45,1
-func writeCSV(filename string, clusters [][]Point) {
+// Writes the list of clusters to a CSV file
+func writeCSV(filename string, clusters []Cluster) {
 	// Sort the clusters by length of each item
 	sort.Slice(clusters, func(i, j int) bool {
-		return len(clusters[i]) > len(clusters[j])
+		return len(clusters[i].points) > len(clusters[j].points)
 	})
 
 	// Open the file
 	file, err := os.Create(filename)
-	defer file.Close()
 	if err != nil {
 		fmt.Println("Error:", err)
 		return
 	}
+	defer file.Close()
 
 	// Write the header
 	file.WriteString("ClusterId,Latitude,Longitude,Size\n")
@@ -81,59 +89,43 @@ func writeCSV(filename string, clusters [][]Point) {
 	for _, cluster := range clusters {
 		// Get the cluster
 		// Get the average point
-		p := pointAverage(cluster)
+		points := []Point{}
+		clusterSize := 0
+		for _, p := range cluster.points {
+			points = append(points, *p.Point)
+			clusterSize += p.cnt
+		}
+		p := pointAverage(points)
 		// Write the cluster to the file
-		file.WriteString(fmt.Sprintf("%d,%f,%f,%d\n", clusterId, p.y, p.x, len(cluster)))
+
+		file.WriteString(fmt.Sprintf("%d,%f,%f,%d\n", clusterId, p.y, p.x, clusterSize))
 		clusterId++
 	}
 }
 
-func writeClusterPoints(filename string, clusters [][]Point) {
+// Saves the cluster points from a list of clusters to a CSV file
+func writeClusterPoints(filename string, clusters []Cluster) {
 	// Sort the clusters by length of each item
 	sort.Slice(clusters, func(i, j int) bool {
-		return len(clusters[i]) > len(clusters[j])
+		return len(clusters[i].points) > len(clusters[j].points)
 	})
 
 	// Open the file
 	file, err := os.Create(filename)
-	defer file.Close()
 	if err != nil {
 		fmt.Println("Error:", err)
 		return
 	}
+	defer file.Close()
 
 	// Write the header
 	file.WriteString("ClusterId,Latitude,Longitude\n")
 	clusterId := 1
 	for _, cluster := range clusters {
-		for _, p := range cluster {
+		for _, p := range cluster.points {
 			// Write the cluster to the file
 			file.WriteString(fmt.Sprintf("%d,%f,%f\n", clusterId, p.y, p.x))
 		}
-		clusterId++
-	}
-}
-
-func savePoints(filename string, points []Point) {
-
-	// Open the file
-	file, err := os.Create(filename)
-	defer file.Close()
-	if err != nil {
-		fmt.Println("Error:", err)
-		return
-	}
-
-	// Write the header
-	file.WriteString("Id,Latitude,Longitude\n")
-
-	// Write the clusters
-	clusterId := 0
-	for _, p := range points {
-		// Get the cluster
-		// Get the average point
-		// Write the cluster to the file
-		file.WriteString(fmt.Sprintf("%d,%f,%f\n", clusterId, p.y, p.x))
 		clusterId++
 	}
 }

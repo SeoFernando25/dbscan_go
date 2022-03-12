@@ -3,54 +3,59 @@ package main
 import (
 	"fmt"
 	"math"
-	"sync"
 )
 
 // BSPTree is a 2d spatial index of Point objects.
+
+type BSPTreePoint struct {
+	*Point
+	cnt int
+}
+
 type BSPTree struct {
-	size       int
-	subdivided bool
-	rect       Rect
-	points     []*Point
-	left       *BSPTree
-	right      *BSPTree
+	cnt   int // How many points are there in this node?
+	size  int // How many points are in the tree in total?
+	rect  Rect
+	point *Point
+	left  *BSPTree
+	right *BSPTree
 }
 
 // Create a new BSPTree
 func NewBSPTree(x, y, w, h float64) *BSPTree {
 	return &BSPTree{
-		rect:       Rect{x, y, w, h},
-		subdivided: false,
-		points:     []*Point{},
+		rect: Rect{x, y, w, h},
 	}
+}
+
+// Create a new BSPTree
+func NewBSPTreeFromPoints(r Rect, points *[]Point) *BSPTree {
+	tree := NewBSPTree(r.x, r.y, r.w, r.h)
+	for i := 0; i < len(*points); i++ {
+		p := &(*points)[i]
+		tree.Insert(p)
+	}
+	return tree
 }
 
 // Tree insert
 func (q *BSPTree) Insert(p *Point) {
 	q.size++
-	// If already subdivided, insert into appropriate branch
-	if q.subdivided {
-		if q.left.Contains(*p) {
+	if q.point == nil && q.left == nil && q.right == nil { // Try normal insert
+		q.point = p
+		q.cnt = 1
+	} else if q.left != nil && q.right != nil { // Find closes quadrant
+		distLeft := p.Distance(q.left.rect.Centroid())
+		distRight := p.Distance(q.right.rect.Centroid())
+		if distLeft < distRight {
 			q.left.Insert(p)
-		} else if q.right.Contains(*p) {
-			q.right.Insert(p)
 		} else {
-			q.Rebuild(p)
+			q.right.Insert(p)
 		}
-		return
-	}
-
-	// Otherwise, if point is too close to existing point, add to list
-	// Otherwise, subdivide
-	if len(q.points) == 0 {
-		q.points = append(q.points, p)
-	} else {
-		delta := q.points[0].Distance(*p)
-		const epsilon = 0.001
-		q.points = append(q.points, p)
-		if delta > epsilon {
-			q.Subdivide(p)
-		}
+	} else if q.point != nil && q.point.Distance(*p) == 0 { // If point is in the exact same place, add it to the tree
+		q.cnt++
+	} else { // Subdivide
+		q.Subdivide(p)
 	}
 }
 
@@ -59,103 +64,113 @@ func (q *BSPTree) Subdivide(p *Point) {
 	// Initialize the quadrants
 	// If rect is vertical rectangle split vertically, else split horizontally
 	ratio := q.rect.w / q.rect.h
-	if ratio > 1 {
-		q.left = NewBSPTree(q.rect.x, q.rect.y, q.rect.w/2, q.rect.h)
-		q.right = NewBSPTree(q.rect.x+q.rect.w/2, q.rect.y, q.rect.w/2, q.rect.h)
-	} else {
-		q.left = NewBSPTree(q.rect.x, q.rect.y, q.rect.w, q.rect.h/2)
-		q.right = NewBSPTree(q.rect.x, q.rect.y+q.rect.h/2, q.rect.w, q.rect.h/2)
+	if ratio >= 1 { // Split vertically
+		w := q.rect.w / 2
+		q.left = NewBSPTree(q.rect.x, q.rect.y, w, q.rect.h)
+		q.right = NewBSPTree(q.rect.x+w, q.rect.y, w, q.rect.h)
+	} else { // Split horizontally
+		h := q.rect.h / 2
+		q.left = NewBSPTree(q.rect.x, q.rect.y, q.rect.w, h)
+		q.right = NewBSPTree(q.rect.x, q.rect.y+h, q.rect.w, h)
 	}
 
 	// Add points to their respective quadrants
-	for _, pts := range q.points {
-		if q.left.Contains(*pts) {
-			q.left.Insert(pts)
-		} else {
-			q.right.Insert(pts)
-		}
+	distLeft := q.point.Distance(q.left.rect.Centroid())
+	distRight := q.point.Distance(q.right.rect.Centroid())
+
+	var toInsert *BSPTree
+	if distLeft < distRight {
+		toInsert = q.left
+	} else {
+		toInsert = q.right
 	}
 
-	q.subdivided = true
-	q.points = []*Point{}
-}
+	toInsert.point = q.point
+	toInsert.cnt = q.cnt
+	toInsert.size = q.cnt // Subtract the point we just added (we are inserting a new point)
 
-// Check if point is inside tree rect
-func (q *BSPTree) Contains(p Point) bool {
-	gt_left := p.x >= q.rect.x
-	lt_right := p.x < q.rect.x+q.rect.w
-	gt_top := p.y >= q.rect.y
-	lt_bottom := p.y < q.rect.y+q.rect.h
-	return gt_left && lt_right && gt_top && lt_bottom
-}
+	distLeft = p.Distance(q.left.rect.Centroid())
+	distRight = p.Distance(q.right.rect.Centroid())
 
-// Get all the points in the tree
-func (q *BSPTree) GetPoints() []*Point {
-	if q.subdivided {
-		return append(q.left.GetPoints(), q.right.GetPoints()...)
+	if distLeft < distRight {
+		q.left.Insert(p)
+	} else {
+		q.right.Insert(p)
 	}
-	return q.points
+
+	q.point = nil // Clear the point (it's been inserted into the children)
+	q.cnt = 0
 }
 
 func (q *BSPTree) Rebuild(p *Point) {
 	fmt.Println("Warning: rebuilding tree!!!")
 	// Get all points in the tree
-	points := q.GetPoints()
+	points := q.Query(q.rect)
 
 	// Get bounding box of all points including the new point
-	var minx, miny, maxx, maxy float64 = math.MaxFloat64, math.MaxFloat64, -math.MaxFloat64, -math.MaxFloat64
-	allPoints := []*Point{p}
-	allPoints = append(allPoints, points...)
+	var minX, minY, maxX, maxY float64 = math.MaxFloat64, math.MaxFloat64, -math.MaxFloat64, -math.MaxFloat64
+	allPoints := make([]*Point, len(points))
+	allPoints = append(allPoints, p)
+	for _, bspPoint := range points {
+		for i := 0; i < bspPoint.cnt; i++ {
+			allPoints = append(allPoints, bspPoint.Point)
+		}
+	}
 	for _, p := range allPoints {
-		if p.x < minx {
-			minx = p.x
+		if p.x < minX {
+			minX = p.x
 		}
-		if p.y < miny {
-			miny = p.y
+		if p.y < minY {
+			minY = p.y
 		}
-		if p.x > maxx {
-			maxx = p.x
+		if p.x > maxX {
+			maxX = p.x
 		}
-		if p.y > maxy {
-			maxy = p.y
+		if p.y > maxY {
+			maxY = p.y
 		}
 	}
 
 	// Create new bounding box with padding
-	q.rect = Rect{minx - 1, miny - 1, maxx - minx + 2, maxy - miny + 2}
-	q.points = []*Point{}
-	q.subdivided = false
+	q.rect = Rect{minX - 1, minY - 1, maxX - minX + 2, maxY - minY + 2}
+	q.point = nil
 	q.left = nil
 	q.right = nil
 
 	// Re-add all points to the tree
-	for _, pts := range points {
+	for _, pts := range allPoints {
 		q.Insert(pts)
 	}
-	q.Insert(p)
 }
 
-func (q *BSPTree) QueryImpl(r Rect, c chan *Point, g *sync.WaitGroup) {
-	if q.subdivided {
-		g.Add(2)
-		q.left.QueryImpl(r, c, g)
-		q.right.QueryImpl(r, c, g)
-	} else {
-		for _, pts := range q.points {
-			if rectPointIntersect(r, *pts) {
-				c <- pts
-			}
-		}
+func (q *BSPTree) Query(r Rect) []BSPTreePoint {
+	c := q.QueryAsync(r)
+	var points []BSPTreePoint
+	for p := range c {
+		points = append(points, p)
+	}
+	return points
+}
+
+func (q *BSPTree) QueryChan(r Rect, c chan BSPTreePoint) {
+	if q == nil {
+		return
+	}
+
+	q.left.QueryChan(r, c)
+	q.right.QueryChan(r, c)
+
+	if q.point != nil && rectPointIntersect(r, *q.point) {
+		c <- BSPTreePoint{q.point, q.cnt}
 	}
 }
 
-// Query the tree for points within a given rect (unstable)
-func (q *BSPTree) Query(r Rect) <-chan *Point {
-	c := make(chan *Point, q.size)
+// Returns an iterator over a query
+func (q *BSPTree) QueryAsync(r Rect) <-chan BSPTreePoint {
+	c := make(chan BSPTreePoint, q.size)
 
 	go func() {
-		var wg sync.WaitGroup
-		q.QueryImpl(r, c, &wg)
+		q.QueryChan(r, c)
 		close(c)
 	}()
 
@@ -163,6 +178,6 @@ func (q *BSPTree) Query(r Rect) <-chan *Point {
 }
 
 // Iterate over all points
-func (q *BSPTree) Iterate() <-chan *Point {
-	return q.Query(q.rect)
+func (q *BSPTree) Iterate() <-chan BSPTreePoint {
+	return q.QueryAsync(q.rect)
 }

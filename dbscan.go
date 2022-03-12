@@ -4,71 +4,177 @@ import (
 	"sync"
 )
 
-// Function dbscan takes list of point and return list of list of points
-func dbscan(bsp *BSPTree, epsilon float64, minPts int) [][]Point {
-	clusters := sync.Map{} // Maps Point to Int
-	merges := sync.Map{}   // Maps Int to map of int
-	var wg sync.WaitGroup
+// Cluster holds a rect and a list of points
+type Cluster struct {
+	Rect
+	points []BSPTreePoint
+}
 
-	clusterId := 0
-	// For each point in the tree
-	for p := range bsp.Iterate() {
-		clusterId++
-		// If point was already assigned to a cluster, skip it
+// Thread pool job producer that returns partitions of points that are within the maxJobSize threshold.
+// Note that maxJobSize is not guaranteed if tree can't be futher broken down.
+func dbscanProducer(bsp *BSPTree, maxJobSize int, wg *sync.WaitGroup) <-chan *BSPTree {
+	outJobs := make(chan *BSPTree, maxJobSize)
+	wg.Add(1)
+
+	go func() { // Iterate over tree for nodes that satisfy the maxJobSize threshold
+		q := []*BSPTree{bsp}
+		for len(q) > 0 {
+			// Pop
+			current := q[0]
+			q = q[1:]
+
+			if current.size > maxJobSize { // If size is too big, split
+				// Split
+				if current.left != nil && current.right != nil {
+					q = append(q, current.left)
+					q = append(q, current.right)
+				} else { // Can't split, just add it anyway
+					outJobs <- current
+				}
+			} else if current.size > 0 { // Add to jobs
+				outJobs <- current
+			}
+		}
+		close(outJobs)
+		wg.Done()
+	}()
+
+	return outJobs
+}
+
+// A simple thread pool worker that wait for jobs and processes them
+func dbscanWorker(bsp <-chan *BSPTree, res chan<- Cluster, epsilon float64, wg *sync.WaitGroup) {
+	for bspJob := range bsp {
+		dbscan(bspJob, epsilon, res)
+	}
+	wg.Done()
+}
+
+// Returns a channel containing the unmerged clusters
+func dbscanParallel(bspRoot *BSPTree, epsilon float64, maxJobSize int, nWorkers int) <-chan Cluster {
+	var (
+		wg   sync.WaitGroup
+		res  = make(chan Cluster, maxJobSize)
+		jobs = dbscanProducer(bspRoot, maxJobSize, &wg)
+	)
+
+	for i := 0; i < nWorkers; i++ {
 		wg.Add(1)
-		go func(p *Point, clusterId int) {
-			toMerge := make(map[int]bool)
+		go dbscanWorker(jobs, res, epsilon, &wg)
+	}
 
-			// // Query neighbors (including the point itself)
-			r := Rect{p.x - epsilon, p.y - epsilon, epsilon * 2, epsilon * 2}
-			toVisit := []Point{}
-			for n := range bsp.Query(r) {
-				toVisit = append(toVisit, *n)
+	go func() {
+		wg.Wait()
+		close(res)
+	}()
+
+	return res
+}
+
+// Perform DBSCAN clustering from a spatial partitioning tree
+// Returns a list of points that are within epsilon distance of the query point
+func dbscan(bsp *BSPTree, epsilon float64, res chan<- Cluster) {
+	visited := make(map[BSPTreePoint]bool)
+	// For each point in the tree
+	for pQuery := range bsp.Iterate() {
+		mainPoint := pQuery.Point
+		// If key in visited map, skip
+		if _, ok := visited[pQuery]; ok {
+			continue
+		}
+
+		// Calculate cluster bounding box
+		minX := mainPoint.x
+		minY := mainPoint.y
+		maxX := mainPoint.x
+		maxY := mainPoint.y
+
+		// Find neighbors (including the point itself)
+		r := Rect{mainPoint.x - epsilon, mainPoint.y - epsilon, epsilon * 2, epsilon * 2}
+		toVisit := []BSPTreePoint{}
+		for n := range bsp.QueryAsync(r) {
+			toVisit = append(toVisit, n)
+		}
+		clusterPoints := []BSPTreePoint{}
+
+		// Recursively visit neighbors
+		for len(toVisit) > 0 {
+			current := toVisit[0]
+			toVisit = toVisit[1:]
+
+			// If key in visited map, skip
+			if _, ok := visited[current]; ok {
+				continue
 			}
 
-			// Recursively visit neighbors
-			for len(toVisit) > 0 {
-				current := toVisit[0]
-				toVisit = toVisit[1:]
-
-				if val, ok := clusters.Load(current); ok {
-					toMerge[val.(int)] = true
-					continue
+			// Query neighbors, excluding the point itself
+			r := Rect{current.x - epsilon, current.y - epsilon, epsilon * 2, epsilon * 2}
+			for n := range bsp.QueryAsync(r) {
+				// If point is within epsilon distance, add to toVisit
+				if n.Point.Distance(*current.Point) <= epsilon && !pointIntersect(*n.Point, *mainPoint) {
+					toVisit = append(toVisit, n)
 				}
+			}
+			visited[current] = true // Mark as visited
 
-				// Query neighbors (including the point itself)
-				r := Rect{current.x - epsilon, current.y - epsilon, epsilon * 2, epsilon * 2}
-				for n := range bsp.Query(r) {
-					if n.Distance(current) <= epsilon && n.x != p.x && n.y != p.y {
-						toVisit = append(toVisit, *n)
+			clusterPoints = append(clusterPoints, current) // Add to cluster
+
+			// Update bounding box
+			if current.x < minX {
+				minX = current.x
+			}
+			if current.y < minY {
+				minY = current.y
+			}
+			if current.x > maxX {
+				maxX = current.x
+			}
+			if current.y > maxY {
+				maxY = current.y
+			}
+		}
+		boundingRect := Rect{minX, minY, maxX - minX, maxY - minY}
+		res <- Cluster{boundingRect, clusterPoints}
+	}
+}
+
+// This is a naive implementation for merging clusters
+// it does not take into account the spatial partitioning tree and runs in O(n^2) time
+// DO NOT GRADE THIS FUNCTION, THIS IS JUST AN EXTRA SO THAT I COULD SEE THE END RESULT
+func mergeClusters(clusters []Cluster, epsilon float64) []Cluster {
+	// Merge clusters
+	index := 0
+
+start:
+	for index < len(clusters) {
+		current := clusters[index]
+
+		// Get all neighbors
+		for i := 0; i < len(clusters); i++ {
+			if i == index {
+				continue
+			}
+
+			// Intersection Rect is rect + epsilon
+			adjustedRect := current.Rect.Expand(epsilon)
+			if rectIntersect(current.Rect, adjustedRect) {
+				neighbor := clusters[i]
+				// Merge with neighbors if any point is within epsilon distance
+				for _, p := range current.points {
+					for _, p2 := range neighbor.points {
+						if p.Point.Distance(*p2.Point) <= epsilon {
+							// fmt.Println("Merging")
+							current.points = append(current.points, neighbor.points...)
+							current.Rect = current.Rect.Merge(neighbor.Rect)
+							// Delete merged neighbor
+							clusters = append(clusters[:i], clusters[i+1:]...)
+							goto start
+						}
 					}
 				}
-				clusters.Store(current, clusterId)
 			}
-
-			merges.Store(clusterId, toMerge)
-			wg.Done()
-		}(p, clusterId)
+		}
+		index++
 	}
-	wg.Wait()
-	// Printlen of cluster[0]
-	// fmt.Println(len(clusters))
-
-	// Collect the values of clusterMap into a list
-	ret := make([][]Point, 0)
-
-	clusters.Range(func(key, value interface{}) bool {
-		ret = append(ret, []Point{key.(Point)})
-		return true
-
-	})
-
-	// for _, v := range clusters {
-	// 	if len(v) >= minPts {
-	// 		ret = append(ret, v)
-	// 	}
-	// }
-
-	// Print size of clusters
-	return ret
+	return clusters
 }
