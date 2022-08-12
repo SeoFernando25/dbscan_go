@@ -1,11 +1,5 @@
 # Concurrent DBSCAN GO
 
-```
-STUDENT NAME: FERNANDO BERTI CRUZ NOGUEIRA
-STUDENT NUMBER: 300195829
-COURSE: CSI2520*[A] Paradigmes de programmation 20221
-```
-
 This is a simple implementation of the [DBSCAN algorithm](https://en.wikipedia.org/wiki/DBSCAN)
 That uses binary space partitioning to speed up neighborhood search.
 
